@@ -19,7 +19,6 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE.*"]
 
-
 [project.urls]
 Repository = "https://github.com/khershberger/imagep"
 
@@ -31,3 +30,6 @@ imagep-gui = "spam:main"
 
 [project.entry-points."spam.magical"]
 tomatoes = "spam:main_tomatoes"
+
+[tool.ruff]
+ignore = ["F401", "F841"]

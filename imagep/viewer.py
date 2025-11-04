@@ -1,29 +1,48 @@
+from annotations import Annotation
+from preferences import get_preferences
+import json
 import logging
 import tomllib
 from math import sqrt, remainder
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QLabel,
     QStatusBar,
     QVBoxLayout,
     QWidget,
+    QTreeWidgetItem,
 )
 from PySide6.QtGui import (
     QColor,
     QFont,
+    QFontMetrics,
     QMouseEvent,
     QWheelEvent,
     QPainter,
-    QPen,
     QTransform,
+    QPen,
 )
-from PySide6.QtCore import Qt, QPoint, QRect, QSize
 
-from layers import DeepzoomLayer
+from PySide6.QtCore import Qt, QPoint, QRect, Signal
+
+from layers import DeepzoomLayer, Layer, RasterImageLayer
 
 
 class LayeredViewer(QWidget):
-    def __init__(self, source=None, config=None, parent=None):
+    """Main deepzoom viewer widget managing layers and annotations.
+
+    Responsibilities:
+    - Render selected layers and their annotations.
+    - Coordinate transforms (pan/zoom) via a QTransform.
+    - Interactive annotation creation, selection, dragging, and editing.
+    - Emit selection signals so external docks (annotation properties) can sync.
+    """
+
+    # Emitted when an annotation is selected; payload is the Annotation object.
+    annotation_selected = Signal(object)
+
+    def __init__(self, config: Path = None, selection_widget=None, parent=None):
         super().__init__(parent)
         self.log = logging.getLogger("DeepzoomViewer")
         self.dragging = False
@@ -39,88 +58,314 @@ class LayeredViewer(QWidget):
         self.setFocusPolicy(Qt.WheelFocus)
 
         self.canvas_to_viewer = QTransform()
+        self.selection_widget = selection_widget
+        self.selected_annotation = None
+        self._drag_offset = None
+        # Reference to annotation dock (set externally) used for live property sync.
+        self.annotation_dock = None
+        # Layer adjustment parameters (cycled with keypad 5)
+        self._adjust_steps = [0.04, 0.2, 1.0, 5.0, 25.0]
+        self._adjust_index = 2  # default mid value
+        self._scale_base = 0.05  # base scale step
+        self._translate_base = 25  # pixels per move at base step
+        self._rotation_base = 1.0  # degrees per rotate at base step
 
-        # Create layers
-        if config is not None:
-            with open(config, "rb") as fin:
-                config_dict = tomllib.load(fin)
-            self.layers = []
-            for key, value in config_dict["layers"].items():
-                new = DeepzoomLayer(
-                    value["source"],
-                    self,
-                    scale=value["scale"],
-                    offset=QPoint(*value["offset"]),
-                    rotation=value["rotation"],
-                    rotation_center=QPoint(*value["origin"]),
-                )
-                new.set_annotations(value.get("annotations", []))
-                self.layers.append(new)
+    def _annotation_at_pos(self, pos: QPoint):
+        """Return annotation under viewer coordinate `pos` or None.
 
-        elif source is not None:
-            self.layers = [
-                DeepzoomLayer(
-                    source,
-                    self,
-                    scale=1.0,
-                    offset=QPoint(-0, -0),
-                    rotation=0.0,
-                    rotation_center=QPoint(0, 0),
-                ),
-                # DeepzoomLayer(
-                #     source,
-                #     self,
-                #     scale=2.0,
-                #     offset=QPoint(-127, -127),
-                #     rotation=5.0,
-                #     rotation_center=QPoint(127, 127),
-                # ),
-                # DeepzoomLayer(
-                #     source,
-                #     self,
-                #     scale=0.5,
-                #     offset=QPoint(254, 254),
-                #     rotation=-5.0,
-                #     rotation_center=QPoint(127, 127),
-                # ),
-            ]
+        Uses a simple bounding box around the rendered text. Could be enhanced
+        later with better shape or tolerance logic.
+        """
+        from PySide6.QtGui import QFont, QFontMetrics
+        from PySide6.QtCore import QRect
+
+        for layer in self.get_layers():
+            # Convert pos from viewer coordinates to layer coordinates
+            layer_pos = self.get_transform("canvas", "layer", layer=layer).map(pos)
+            for ann in getattr(layer, "annotations", []):
+                font = QFont("Arial", ann.font_size, QFont.Bold)
+                metrics = QFontMetrics(font)
+                rect = QRect(ann.position, metrics.size(0, ann.label))
+                if rect.contains(layer_pos):
+                    return ann
+        return None
+
+    def set_selection_widget(self, selection_widget):
+        self.selection_widget = selection_widget
+
+    def get_layers(self, all=False):
+        # Return all layer objects from the config_tree_item
+        layers = []
+        if not hasattr(self, "selection_widget") or self.selection_widget is None:
+            return layers
+
+        if all:
+            for i in range(self.selection_widget.childCount()):
+                item = self.selection_widget.child(i)
+                layer = item.data(0, Qt.UserRole)
+                if isinstance(layer, Layer):
+                    layers.append(layer)
         else:
-            raise Exception(
-                "No valid configuration information provided to DeepzoomViewer"
+            tree_widget = self.selection_widget.treeWidget()
+            selected_items = tree_widget.selectedItems() if tree_widget else []
+            for item in selected_items:
+                layer = item.data(0, Qt.UserRole)
+                if isinstance(layer, Layer):
+                    layers.append(layer)
+        return layers
+
+    def get_transform(self, source, target, layer=None):
+        """Transform a point between coordinate systems.
+
+        Parameters
+        ----------
+        source: str
+            Source coordinate system: "canvas", "viewer", or "layer".
+        target: str
+            Target coordinate system: "canvas", "viewer", or "layer".
+        layer: Layer | None
+            Layer to use for "layer" coordinate system. If None, uses first selected layer.
+
+        Returns
+        -------
+        QTransform
+            Transformation from source to target coordinate system.
+        """
+        if source == target:
+            return QTransform()
+
+        if layer is None and (source == "layer" or target == "layer"):
+            # Assume first selected layer for layer coordinates
+            layers = self.get_layers()
+            if not layers:
+                raise ValueError(
+                    "No layers available for layer coordinate transformation."
+                )
+            layer = layers[0]
+
+        # Build transformation from source to viewer
+        if source == "canvas":
+            source_to_viewer = self.canvas_to_viewer
+        elif source == "viewer":
+            source_to_viewer = QTransform()  # Identity
+        elif source == "layer":
+            source_to_viewer = layer.layer_to_canvas * self.canvas_to_viewer
+
+        # Build transformation from viewer to target
+        if target == "canvas":
+            viewer_to_target = self.canvas_to_viewer.inverted()[0]
+        elif target == "viewer":
+            viewer_to_target = QTransform()  # Identity
+        elif target == "layer":
+            viewer_to_target = layer.layer_to_canvas.inverted()[0]
+
+        return source_to_viewer * viewer_to_target
+
+    def _on_add_annotation(
+        self, text: str, color: QColor, font_size: int, target_layer_name
+    ):
+        """Signal handler from annotation dock to begin placing a new annotation.
+
+        Parameters
+        ----------
+        text: str
+            Initial annotation label.
+        color: QColor
+            Annotation text color.
+        font_size: int
+            Font size to use.
+        target_layer_name: str | None
+            Name of target layer or None to use current selected layer.
+        """
+
+        prefs = get_preferences()
+        ann_defaults = prefs.annotation_defaults
+        # Use dock values if provided, else fallback to preferences
+        use_color = (
+            color if color else QColor(ann_defaults.get("text_color", "#0000FF"))
+        )
+        use_font_size = font_size if font_size else ann_defaults.get("font_size", 18)
+        pos = QPoint(self.width() // 2, self.height() // 2)
+        self.annotation_preview = Annotation(
+            label=text,
+            color=use_color,
+            position=pos,
+            parent=self,
+            fontsize=use_font_size,
+        )
+
+        self._target_layer_name = target_layer_name
+        self.annotation_tool_active = True
+        self.placing_annotation = True
+        self.setCursor(Qt.CrossCursor)
+        self.update()
+
+    def set_annotation_tool_state(self, state: bool):
+        """Enable/disable annotation placement tool (used by legacy toolbar dot action)."""
+        self.annotation_tool_active = state
+        if state:
+            # Create a simple default preview if none has been created via dock.
+            if not getattr(self, "annotation_preview", None):
+                pos = QPoint(self.width() // 2, self.height() // 2)
+                self.annotation_preview = Annotation(
+                    label="",
+                    color=Qt.blue,
+                    position=pos,
+                    parent=self,
+                    fontsize=18,
+                )
+            self.placing_annotation = True
+            self.setCursor(Qt.CrossCursor)
+        else:
+            self.annotation_preview = None
+            self.placing_annotation = False
+            self.setCursor(Qt.ArrowCursor)
+        self.update()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if getattr(self, "annotation_tool_active", False) and getattr(
+            self, "placing_annotation", False
+        ):
+            # Move preview dot with mouse
+            if self.annotation_preview:
+                self.annotation_preview.position = event.pos()
+                self.update()
+
+        elif (
+            self.selected_annotation
+            and self._drag_offset is not None
+            and event.buttons() & Qt.LeftButton
+        ):
+            # Drag selected annotation
+            self.selected_annotation.position = event.pos() - self._drag_offset
+            self.update()
+
+        elif self.dragging:
+            delta = event.pos() - self.last_mouse_pos
+            self.canvas_to_viewer *= QTransform().translate(delta.x(), delta.y())
+            self.last_mouse_pos = event.pos()
+            self.update()
+        self._update_status(event.pos())
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            ann = self._annotation_at_pos(event.pos())
+            if ann:
+                self.selected_annotation = ann
+                self._drag_offset = event.pos() - ann.position
+                # Emit selection signal so dock can sync controls
+                self.annotation_selected.emit(ann)
+                self.update()
+            else:
+                self.selected_annotation = None
+                self._drag_offset = None
+            self.dragging = True
+            self.last_mouse_pos = event.pos()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        if (
+            getattr(self, "annotation_tool_active", False)
+            and getattr(self, "placing_annotation", False)
+            and event.button() == Qt.LeftButton
+        ):
+            # Fix the annotation position on second click
+            self.placing_annotation = False
+
+            # Transfer preview annotation to layer
+            annotation = self.annotation_preview
+            # Determine target layer
+            layer = None
+            if getattr(self, "_target_layer_name", None):
+                for layer_obj in self.get_layers(all=True):
+                    if (layer_obj.objectName() or "") == self._target_layer_name:
+                        layer = layer_obj
+                        break
+            if layer is None:
+                # Fallback to currently selected layer
+                try:
+                    layer = self.get_layers()[0]
+                except IndexError:
+                    layer = None
+            if layer is None:
+                # No layer available; abort placement
+                self.annotation_preview = None
+                self.annotation_tool_active = False
+                self.placing_annotation = False
+                self.setCursor(Qt.ArrowCursor)
+                return
+            annotation._parent = layer
+
+            # Transform position from viewer to layer coordinates
+            annotation.position = layer.layer_to_canvas.inverted()[0].map(
+                self.canvas_to_viewer.inverted()[0].map(annotation.position)
             )
 
+            if not hasattr(layer, "annotations"):
+                layer.annotations = []
+            layer.annotations.append(annotation)
+            self.setCursor(Qt.IBeamCursor)
+
+            # # Ask for label input via main window
+            mw = self.parent().parent()
+            mw.deactivate_dot_tool()
+            # if hasattr(mw, "start_label_input"):
+            #     mw.start_label_input(annotation, lambda: mw.deactivate_dot_tool())
+            self.update()
+
+        # End drag of annotation
+        if self.selected_annotation and self._drag_offset is not None:
+            self._drag_offset = None
+        if event.button() == Qt.LeftButton:
+            self.dragging = False
+
+    def getPainter(self) -> QPainter:
+        return self._painter
+
     def paintEvent(self, event):
-        painter = QPainter(self)
-        for layer in self.layers:
-            painter.save()
-            layer.paint_layer(painter, self.canvas_to_viewer)
-            painter.restore()
+        self._painter = QPainter(self)
 
-        painter.setPen(QPen(Qt.red, 1))
+        # Fill background from preferences
+        prefs = get_preferences()
+        bg = prefs.background_color
+        try:
+            from PySide6.QtGui import QColor
 
-        # Draw Grid
-        self.draw_grid(painter, 127)
+            self._painter.fillRect(self.rect(), QColor(bg))
+        except Exception:
+            self._painter.fillRect(self.rect(), Qt.black)
 
-        # Draw blue dot at viewer origin
-        painter.setPen(QPen(Qt.blue, 10))
-        self.annotate_point(
-            painter,
-            self.canvas_to_viewer.map(QPoint(0, 0)),
-            "(0,0)",
-            radius=4,
-            fontsize=14,
-        )
+        # Only paint the selected layers
+        for layer in self.get_layers():
+            self._painter.save()
+            layer.paint_layer(self.canvas_to_viewer)
 
-        # Draw point at viewer (127, 127)
-        self.annotate_point(
-            painter,
-            self.canvas_to_viewer.map(QPoint(127, 127)),
-            "(127, 127)",
-            radius=4,
-            fontsize=14,
-        )
+            # Paint annotations here
+            for annotation in getattr(layer, "annotations", []):
+                annotation.paintEvent(event)
+                # Highlight currently selected annotation with a dashed rectangle
+                if annotation == self.selected_annotation:
+                    font = QFont("Arial", annotation.font_size, QFont.Bold)
+                    metrics = QFontMetrics(font)
+                    rect = QRect(
+                        annotation.position, metrics.size(0, annotation.label)
+                    ).adjusted(-2, -2, 2, 2)
+                    self._painter.save()
+                    self._painter.setPen(QPen(Qt.yellow, 1, Qt.DashLine))
+                    self._painter.drawRect(rect)
+                    self._painter.restore()
+            self._painter.restore()
 
-        painter.end()
+        # self._painter.setPen(QPen(Qt.red, 2))
+        self.draw_grid(self._painter, 125)
+
+        if getattr(self, "placing_annotation", False) and getattr(
+            self, "placing_annotation", None
+        ):
+            # Draw preview annotation
+            self.annotation_preview.paintEvent(event)
+
+        self._painter.end()
+        self._painter = None
 
     def draw_grid(self, painter, grid_size, min_pixels=32):
         # These are scaled to screen pixels
@@ -145,6 +390,8 @@ class LayeredViewer(QWidget):
         offset_x = calc_grid_offset(offset_viewer.x(), step_size)
         offset_y = calc_grid_offset(offset_viewer.y(), step_size)
 
+        painter.setPen(QPen(Qt.red, 1))
+
         for k in range(0, int(self.rect().width() / step_size)):
             x = round(k * step_size - offset_x)
             painter.drawLine(x, 0, x, self.rect().height())
@@ -165,47 +412,210 @@ class LayeredViewer(QWidget):
         self.canvas_to_viewer = self.canvas_to_viewer * scaling
 
         self.update()
-        self.parent().parent().update_status_window(event)
-
-    def mousePressEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self.dragging = True
-            self.last_mouse_pos = event.pos()
-
-    def mouseMoveEvent(self, event: QMouseEvent):
-        if self.dragging:
-            delta = event.pos() - self.last_mouse_pos
-            self.canvas_to_viewer *= QTransform().translate(delta.x(), delta.y())
-            self.last_mouse_pos = event.pos()
-            self.update()
-        self._update_status(event.pos())
-
-    def mouseReleaseEvent(self, event: QMouseEvent):
-        if event.button() == Qt.LeftButton:
-            self.dragging = False
 
     def resizeEvent(self, event):
         self.update()
-
-    def _create_transform(self):
-        canvas_to_viewer = QTransform()
-        canvas_to_viewer.scale(self.scale_canvas, self.scale_canvas)
-        canvas_to_viewer.translate(-self.offset_canvas.x(), -self.offset_canvas.y())
-        return canvas_to_viewer
 
     def get_scale(self):
         return sqrt(abs(self.canvas_to_viewer.determinant()))
 
     def _update_status(self, pos):
-        # # On-screen coordinates
-        # x, y = pos.x(), pos.y()
-        # # Full image pixel coordinates
-        # level = self.layer._choose_level()
-        # scale = self.layer._level_scale(level)
-        # (img_x, img_y) = self.layer.pow_to_img(pos)
-        # # img_x = int((x + self.layer.offset_canvas.x()) / (self.scale_canvas * scale))
-        # # img_y = int((y + self.layer.offset_canvas.y()) / (self.scale_canvas * scale))
-        # self.status_label.setText(
-        #     f"Screen: ({x},{y}) | Image: ({img_x},{img_y}) | Scale: {self.scale:.2f} | Level: {level}"
-        # )
         self.status_label.setText("I do not work right now...")
+
+    def load_config_json(self, config: Path):
+        with config.open("rt") as fin:
+            config_dict = json.load(fin)
+
+        # Only parse first component for now
+        component = config_dict["components"][0]
+
+        ppm = component["layers"][0]["pixelsPerMeter"]
+        for idx, item in enumerate(component["layers"]):
+            cls = Layer
+            if item["source"] is not None:
+                source = config.parent / Path(item["source"]).name
+                if source.suffix == ".dzi":
+                    cls = DeepzoomLayer
+                else:
+                    cls = RasterImageLayer
+            else:
+                source = item["source"]
+
+            new_layer = cls(
+                str(source),
+                self,
+                name=item["name"],
+                scale=ppm / item["pixelsPerMeter"],
+                pixels_per_meter=item["pixelsPerMeter"],
+                offset=-QPoint(*item["origin"]),
+                rotation=item["rotation"],
+                rotation_center=QPoint(0, 0),
+                mirror=item.get("mirror", False),
+            )
+
+            for item in item.get("annotations", []):
+                ann = Annotation(
+                    parent=new_layer,
+                    label=item.get("label", ""),
+                    color=QColor(item.get("color", Qt.blue)),
+                    line_width=item.get("line_width", 2),
+                    fontsize=item.get("font_size", 10),
+                    justification=item.get("justification", "center_center"),
+                    position=QPoint(*item.get("position", (0, 0))),
+                )
+                if not hasattr(new_layer, "annotations"):
+                    new_layer.annotations = []
+                new_layer.annotations.append(ann)
+
+            new_item = QTreeWidgetItem([new_layer.objectName() or f"Layer {idx}"])
+            new_item.setData(0, Qt.UserRole, new_layer)
+            self.selection_widget.addChild(new_item)
+        self.selection_widget.setExpanded(True)
+
+    def dump_config_json(self, config: Path):
+        config_dict = {"components": []}
+        component = {"layers": []}
+        ppm = None
+        for layer in self.get_layers(all=True):
+            if ppm is None:
+                ppm = layer.pixels_per_meter
+            layer_dict = {
+                "name": layer.objectName(),
+                # Attempt to record source path if DeepZoom image; raster images may not expose a reader
+                "source": getattr(layer, "source", None),
+                "pixelsPerMeter": ppm / layer.scale_layer,
+                "origin": [-layer.offset_layer.x(), -layer.offset_layer.y()],
+                "rotation": layer.rotation,
+                "mirror": layer.mirror,
+                "annotations": [
+                    ann.to_dict() for ann in getattr(layer, "annotations", [])
+                ],
+            }
+            component["layers"].append(layer_dict)
+
+        config_dict["components"].append(component)
+
+        with config.open("wt") as fout:
+            json.dump(config_dict, fout, indent=4)
+
+    # --- Layer Transform Hotkeys --------------------------------------------
+    def keyPressEvent(self, event):
+        """Handle numeric keypad hotkeys for layer transform adjustments.
+
+        Mappings:
+        KP_1: Decrease scale
+        KP_2: Translate down
+        KP_3: Increase scale
+        KP_4: Translate left
+        KP_5: Cycle adjustment step size
+        KP_6: Translate right
+        KP_7: Rotate counter-clockwise
+        KP_8: Translate up
+        KP_9: Rotate clockwise
+        """
+        # Handle layer navigation with 'w' (up) and 's' (down) before requiring selection
+        if self.selection_widget is not None:
+            tree_widget = self.selection_widget.treeWidget()
+            if tree_widget:
+                current = tree_widget.currentItem()
+                parent = current.parent() if current else None
+                siblings_parent = parent if parent else self.selection_widget
+                if event.key() == Qt.Key_W:  # select previous sibling
+                    if current:
+                        idx = siblings_parent.indexOfChild(current)
+                        if idx > 0:
+                            tree_widget.setCurrentItem(siblings_parent.child(idx - 1))
+                            self.update()
+                            return
+                elif event.key() == Qt.Key_S:  # select next sibling
+                    if current:
+                        idx = siblings_parent.indexOfChild(current)
+                        if idx < siblings_parent.childCount() - 1:
+                            tree_widget.setCurrentItem(siblings_parent.child(idx + 1))
+                            self.update()
+                            return
+
+        # Work only when a layer is selected for transform hotkeys
+        layers = self.get_layers()
+        if not layers:
+            return
+        layer = layers[0]
+
+        key = event.key()
+        # Only react to keypad; fall back to normal digits if keypad modifier absent
+        step_factor = self._adjust_steps[self._adjust_index]
+
+        if key == Qt.Key_5:
+            # Cycle adjustment index
+            self._adjust_index = (self._adjust_index + 1) % len(self._adjust_steps)
+            self.log.info(
+                "Adjustment step set to %s", self._adjust_steps[self._adjust_index]
+            )
+            return
+
+        # Scale adjustments
+        if key == Qt.Key_3:  # Increase scale (multiply)
+            layer.scale(1.0 + self._scale_base * step_factor)
+        elif key == Qt.Key_1:  # Decrease scale (divide)
+            layer.scale(1.0 / (1.0 + self._scale_base * step_factor))
+        # Translation
+        elif key == Qt.Key_2:  # Down
+            layer.translate(0, self._translate_base * step_factor)
+        elif key == Qt.Key_8:  # Up
+            layer.translate(0, -self._translate_base * step_factor)
+        elif key == Qt.Key_4:  # Left
+            layer.translate(-self._translate_base * step_factor, 0)
+        elif key == Qt.Key_6:  # Right
+            layer.translate(self._translate_base * step_factor, 0)
+        # Rotation
+        elif key == Qt.Key_7:  # CCW
+            layer.rotate(-self._rotation_base * step_factor)
+        elif key == Qt.Key_9:  # CW
+            layer.rotate(self._rotation_base * step_factor)
+        else:
+            # Unhandled key; pass to base implementation
+            return super().keyPressEvent(event)
+
+        self.update()
+
+    def load_config_toml(self, config):
+        with open(config, "rb") as fin:
+            config_dict = tomllib.load(fin)
+        for key, value in config_dict["layers"].items():
+            new = DeepzoomLayer(
+                value["source"],
+                self,
+                scale=value["scale"],
+                offset=QPoint(*value["offset"]),
+                rotation=value["rotation"],
+                rotation_center=QPoint(*value["origin"]),
+            )
+            new.set_annotations(value.get("annotations", []))
+            self.layers.append(new)
+
+    # --- Annotation Dock Integration -------------------------------------------------
+    def set_annotation_dock(self, dock):
+        """Attach the annotation dock to the viewer and wire live editing.
+
+        Parameters
+        ----------
+        dock: AnnotationDockWidget
+            Dock providing annotation creation & property editing UI.
+        """
+        self.annotation_dock = dock
+        # Live property updates when dock controls change.
+        dock.settingsChanged.connect(self._on_dock_settings_changed)
+
+    def _on_dock_settings_changed(self):
+        """Apply dock property changes to the currently selected annotation.
+
+        Executed when the user changes color/font size/text in the dock while an
+        annotation is selected. Updates annotation in-place and repaints.
+        """
+        if not self.selected_annotation or not self.annotation_dock:
+            return
+        ann = self.selected_annotation
+        ann.label = self.annotation_dock.text
+        ann.color = self.annotation_dock.color
+        ann.font_size = self.annotation_dock.font_size
+        self.update()
