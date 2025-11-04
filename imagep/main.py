@@ -1,6 +1,7 @@
 import logging
 import sys
-from PySide6.QtCore import Qt, QPoint, QPointF
+from PySide6.QtCore import Qt, QPoint, QPointF, QSize
+from PySide6.QtGui import QPainter, QColor, QIcon, QAction, QPixmap, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -12,6 +13,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QLabel,
+    QMenuBar,
+    QMenu,
+    QToolBar,
 )
 
 from viewer import LayeredViewer
@@ -30,7 +34,62 @@ class MainWindow(QMainWindow):
         self.status_window.show()
         self.init_ui()
 
+    def create_icon(self, icon_type):
+        icon = QIcon()
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(QPen(QColor(0, 0, 0), 2))
+
+        if icon_type == "dot":
+            painter.setBrush(QColor(0, 0, 0))
+            painter.drawEllipse(12, 12, 8, 8)
+        elif icon_type == "ruler":
+            painter.drawLine(4, 28, 28, 4)
+            # Add small perpendicular lines at ends
+            painter.drawLine(2, 26, 6, 30)
+            painter.drawLine(26, 2, 30, 6)
+        elif icon_type == "rectangle":
+            painter.drawRect(8, 8, 16, 16)
+
+        painter.end()
+        icon.addPixmap(pixmap)
+        return icon
+
+    def create_actions(self):
+        self.actions = {}
+        for tool in ["dot", "ruler", "rectangle"]:
+            action = QAction(self.create_icon(tool), tool.capitalize(), self)
+            action.setStatusTip(f"Add {tool} annotation")
+            self.actions[tool] = action
+
+    def create_menubar(self):
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("Open")
+        file_menu.addAction("Save")
+        file_menu.addSeparator()
+        file_menu.addAction("Exit")
+
+        # Annotations menu
+        annotations_menu = menubar.addMenu("Annotations")
+        for action in self.actions.values():
+            annotations_menu.addAction(action)
+
+    def create_toolbar(self):
+        toolbar = QToolBar()
+        toolbar.setIconSize(QSize(32, 32))
+        for action in self.actions.values():
+            toolbar.addAction(action)
+        self.addToolBar(toolbar)
+
     def init_ui(self):
+        self.create_actions()
+        self.create_menubar()
+        self.create_toolbar()
+
         central = QWidget()
         vbox = QVBoxLayout(central)
 

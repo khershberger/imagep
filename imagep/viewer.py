@@ -153,40 +153,6 @@ class LayeredViewer(QWidget):
             y = round(k * step_size - offset_y)
             painter.drawLine(0, y, self.rect().width(), y)
 
-    def annotate_point(
-        self,
-        painter: QPainter,
-        pos,
-        label,
-        color: QColor = Qt.blue,
-        shape="circle",
-        radius=2,
-        size=QSize(10, 10),
-        line_width=2,
-        fontsize=10,
-    ):
-        painter.setPen(QPen(color, line_width))  # Red pen, 2px wide
-        # painter.setBrush(QColor(255, 0, 0, 100))  # Semi-transparent red brush
-
-        if shape == "circle":
-            painter.drawEllipse(
-                pos.x() - radius,
-                pos.y() - radius,
-                2 * radius,
-                2 * radius,
-            )
-        elif shape == "rect":
-            painter.drawRect(QRect(pos, size))
-
-        # Add label text
-        painter.setPen(color)  # Blue pen
-        painter.setFont(QFont("Arial", fontsize, QFont.Bold))
-        painter.drawText(
-            QRect(pos, QSize(self.width(), self.height())),
-            Qt.AlignTop | Qt.AlignLeft,
-            label,
-        )
-
     def wheelEvent(self, event: QWheelEvent):
         delta = event.angleDelta().y()
         factor = 1.25 if delta > 0 else 0.8
