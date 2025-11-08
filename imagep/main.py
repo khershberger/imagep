@@ -1,6 +1,10 @@
+import base64
+import io
 import logging
 import sys
-from PySide6.QtCore import Qt, QPoint, QPointF
+
+from PySide6.QtCore import Qt, QPoint, QPointF, QSize
+from PySide6.QtGui import QPainter, QColor, QIcon, QAction, QPixmap, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -15,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from viewer import LayeredViewer
+from icons import MICROSCOPE as MAIN_WINDOW_ICON
 # from status_floating_window import StatusFloatingWindow
 
 logging.basicConfig(level=logging.DEBUG)
@@ -25,6 +30,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepZoom Viewer")
+
+        # Set window icon
+        icon_data = base64.b64decode(MAIN_WINDOW_ICON)
+        pixmap = QPixmap()
+        pixmap.loadFromData(icon_data)
+        self.setWindowIcon(QIcon(pixmap))
+
         self.viewer = None
         self.status_window = StatusFloatingWindow(self)
         self.status_window.show()
