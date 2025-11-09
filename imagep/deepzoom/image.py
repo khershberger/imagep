@@ -1,9 +1,11 @@
 import os
 import xml.etree.ElementTree as ET
+import logging
 import math
 import requests
 from io import BytesIO
 from math import log2, ceil
+from time import time
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -17,6 +19,8 @@ class DeepzoomImage:
     """
 
     def __init__(self, source):
+        self.log = logging.getLogger("DeepzoomImage")
+
         self.source = source
         self.is_url = self._is_url(source)
 
@@ -24,6 +28,9 @@ class DeepzoomImage:
 
         self.tile_cache = {}  # (level, col, row): QImage
         self.cache_limit = 128  # default number of non-visible tiles to keep
+        self.cache_hit_rate = 0.0  # Initial cache hit percentage
+        self.cache_hit_rate_alpha = 0.05  # Alpha factor for exponential averaging
+
         self.level_threshold = 0.0  # Threshold adjustment for level switching
 
         self.image_converter = self._convert_qimage
@@ -87,7 +94,7 @@ class DeepzoomImage:
             )
             return files_path
 
-    def load_tile(self, level, col, row) -> bytes:
+    def _load_tile_from_source(self, level, col, row) -> bytes:
         tile_path = self.get_tile_path(level, col, row)
         if self.is_url:
             resp = requests.get(tile_path)
@@ -99,20 +106,47 @@ class DeepzoomImage:
             with open(tile_path, "rb") as f:
                 return f.read()
 
+    def _update_cache_hit(self, is_hit: bool):
+        self.cache_hit_rate = (
+            1.0 if is_hit else 0.0
+        ) * self.cache_hit_rate_alpha + self.cache_hit_rate * (
+            1 - self.cache_hit_rate_alpha
+        )
+
     def get_tile(self, level, col, row):
         key = (level, col, row)
+
         if key in self.tile_cache:
             # self.log.debug(f"Cache hit for tile {key}")
+            self._update_cache_hit(True)
             return self.tile_cache[key]
 
         # self.log.debug(f"Loading tile {key}")
-        data = self.image_converter(self.load_tile(level, col, row))
+        self._update_cache_hit(False)
+        data = self.image_converter(self._load_tile_from_source(level, col, row))
 
         self.tile_cache[key] = data
         self._enforce_cache_limit()
         return data
 
-    def render_region(self, x, y, width, height, level):
+    def cache_tiles(self, tile_list: list):
+        num_tiles = len(tile_list)
+        # Check that tile cache is large enough:
+        if num_tiles > self.cache_limit:
+            self.log.warning("Number of tiles in cache requests exceeds cache limit")
+        self.log.debug("Pre-loading %d tiles.", num_tiles)
+
+        t_start = time()
+        for item in tile_list:
+            self.get_tile(item["level"], item["col"], item["row"])
+        t_finish = time()
+        self.log.debug(
+            "Pre-load operation took %f seconds. Hit-rate: %f",
+            t_finish - t_start,
+            self.cache_hit_rate,
+        )
+
+    def get_visible_tiles(self, x, y, width, height, level):
         # Determine visible tiles
         max_col, max_row = self.max_tile_index(level)
         col0, row0 = self.image_coords_to_tile_index(x, y, level)
@@ -122,15 +156,35 @@ class DeepzoomImage:
         row1 = min(max_row, row1)
         col1 = min(max_col, col1)
 
+        # Tile list:
+        tile_list = []
         for row in range(row0, row1 + 1):
             for col in range(col0, col1 + 1):
-                img = self.reader.get_tile(level, col, row)
+                tile_list.append({"level": level, "col": col, "row": row})
 
-                if img:
-                    # ToDo: Peform rendering
-                    pass
-                else:
-                    self.log.warning("Error loading tile (R%d, C%d)", row, col)
+        return tile_list
+
+    def render_region(self, x, y, width, height, level):
+        tile_list = self._get_visible_tiles(x, y, width, height, level)
+        # Preload all tiles to facilitate parallel IO operations
+        self.cache_tiles(tile_list)
+
+        for item in tile_list:
+            # This should always be pulling from cache
+            img = self.get_tile(item["level"], item["col"], item["row"])
+            scale_level = self.level_scale(level)
+
+            if img:
+                rx = int(item["col"] * self.tile_size / scale_level)
+                ry = int(item["row"] * self.tile_size / scale_level)
+                rw = int(img.width() / scale_level)
+                rh = int(img.height() / scale_level)
+
+                # ToDo: Peform rendering
+            else:
+                self.log.warning(
+                    "Error loading tile (R%d, C%d)", item["row"], item["col"]
+                )
 
     def _convert_qimage(self, data: bytes):
         img = Image.open(BytesIO(data)).convert("RGBA")

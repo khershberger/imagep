@@ -103,20 +103,16 @@ class DeepzoomLayer(Layer):
         viewable_area = screen_to_layer.mapRect(self.parent().rect())
 
         # Determine visible tiles
-        top_left = self.reader.image_coords_to_tile_index(
-            viewable_area.topLeft().x(), viewable_area.topLeft().y(), level
+        tile_list = self.reader.get_visible_tiles(
+            viewable_area.topLeft().x(),
+            viewable_area.topLeft().y(),
+            viewable_area.width(),
+            viewable_area.height(),
+            level,
         )
-        top_left = QPoint(
-            max(0, top_left[0]),
-            max(0, top_left[1]),
-        )
-        bottom_right = self.reader.image_coords_to_tile_index(
-            viewable_area.bottomRight().x(), viewable_area.bottomRight().y(), level
-        )
-        bottom_right = QPoint(
-            min(max_col, bottom_right[0]),
-            min(max_row, bottom_right[1]),
-        )
+
+        # Preload all tiles to facilitate parallel IO operations
+        self.reader.cache_tiles(tile_list)
 
         # self.log.debug(
         #     "Visible Tiles: (R%d,C%d) (R%d,C%d)  Max: (R%d, C%d)",
@@ -128,38 +124,39 @@ class DeepzoomLayer(Layer):
         #     max_col,
         # )
 
-        for row in range(top_left.y(), bottom_right.y() + 1):
-            for col in range(top_left.x(), bottom_right.x() + 1):
-                img = self.reader.get_tile(level, col, row)
+        for item in tile_list:
+            # This should always be pulling from cache
+            img = self.reader.get_tile(item["level"], item["col"], item["row"])
+            scale_level = self.reader.level_scale(level)
 
-                if img:
-                    # In layer coordinates
-                    xy_layer = QPoint(
-                        int(col * tile_size / scale_level),
-                        int(row * tile_size / scale_level),
-                    )
-                    wh_layer = QPoint(
-                        int(img.width() / scale_level),
-                        int(img.height() / scale_level),
-                    )
+            if img:
+                xy_layer = QPoint(
+                    int(item["col"] * tile_size / scale_level),
+                    int(item["row"] * tile_size / scale_level),
+                )
+                wh_layer = QPoint(
+                    int(img.width() / scale_level),
+                    int(img.height() / scale_level),
+                )
 
-                    painter.drawImage(
-                        QRectF(xy_layer, xy_layer + wh_layer),
-                        img,
-                    )
+                painter.drawImage(
+                    QRectF(xy_layer, xy_layer + wh_layer),
+                    img,
+                )
 
-                    # self.log.debug(
-                    #     "Plotting R%d, C%d  (%d,%d), (%d,%d)",
-                    #     row,
-                    #     col,
-                    #     xy_layer.x(),
-                    #     xy_layer.y(),
-                    #     wh_layer.x(),
-                    #     wh_layer.y(),
-                    # )
-
-                else:
-                    self.log.warning("Error loading tile (R%d, C%d)", row, col)
+                # self.log.debug(
+                #     "Rendering R%d, C%d  (%d,%d), (%d,%d)",
+                #     item["row"],
+                #     item["col"],
+                #     xy_layer.x(),
+                #     xy_layer.y(),
+                #     wh_layer.x(),
+                #     wh_layer.y(),
+                # )
+            else:
+                self.log.warning(
+                    "Error loading tile (R%d, C%d)", item["row"], item["col"]
+                )
 
         # Draw test rectangle
         painter.setPen(QPen(Qt.black, 10))
