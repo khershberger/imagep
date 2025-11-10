@@ -273,6 +273,7 @@ class LayeredViewer(QWidget):
 
             # Transfer preview annotation to layer
             annotation = self.annotation_preview
+
             # Determine target layer
             layer = None
             if getattr(self, "_target_layer_name", None):
@@ -295,10 +296,13 @@ class LayeredViewer(QWidget):
                 return
             annotation._parent = layer
 
-            # Transform position from viewer to layer coordinates
-            annotation.position = layer.layer_to_canvas.inverted()[0].map(
-                self.canvas_to_viewer.inverted()[0].map(annotation.position)
+            # Transform position from viewer to canvas coordinates
+            annotation.position = self.canvas_to_viewer.inverted()[0].map(
+                annotation.position
             )
+
+            # Scale font:
+            annotation.font_size = annotation.font_size // self.get_scale()
 
             if not hasattr(layer, "annotations"):
                 layer.annotations = []
@@ -338,7 +342,11 @@ class LayeredViewer(QWidget):
         for layer in self.get_layers():
             self._painter.save()
             layer.paint_layer(self.canvas_to_viewer)
+            self._painter.restore()
 
+            # Set painter to canvas coordinates
+            self._painter.save()
+            self._painter.setTransform(self.canvas_to_viewer)
             # Paint annotations here
             for annotation in getattr(layer, "annotations", []):
                 annotation.paintEvent(event)
@@ -353,6 +361,8 @@ class LayeredViewer(QWidget):
                     self._painter.setPen(QPen(Qt.yellow, 1, Qt.DashLine))
                     self._painter.drawRect(rect)
                     self._painter.restore()
+
+            # Set painter back to viewer coordinates
             self._painter.restore()
 
         # self._painter.setPen(QPen(Qt.red, 2))
