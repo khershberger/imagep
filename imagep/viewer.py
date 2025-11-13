@@ -75,18 +75,19 @@ class LayeredViewer(QWidget):
 
         Uses a simple bounding box around the rendered text. Could be enhanced
         later with better shape or tolerance logic.
+
+        Parameters
+        ----------
+        pos: QPoint
+            Position in canvas coordinates to check for annotation hit.
         """
         from PySide6.QtGui import QFont, QFontMetrics
         from PySide6.QtCore import QRect
 
         for layer in self.get_layers():
             # Convert pos from viewer coordinates to layer coordinates
-            layer_pos = self.get_transform("canvas", "layer", layer=layer).map(pos)
             for ann in getattr(layer, "annotations", []):
-                font = QFont("Arial", ann.font_size, QFont.Bold)
-                metrics = QFontMetrics(font)
-                rect = QRect(ann.position, metrics.size(0, ann.label))
-                if rect.contains(layer_pos):
+                if ann.bounding_box.contains(pos):
                     return ann
         return None
 
@@ -223,6 +224,8 @@ class LayeredViewer(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        pos_canvas = self.get_transform("viewer", "canvas").map(event.pos())
+
         if getattr(self, "annotation_tool_active", False) and getattr(
             self, "placing_annotation", False
         ):
@@ -237,7 +240,7 @@ class LayeredViewer(QWidget):
             and event.buttons() & Qt.LeftButton
         ):
             # Drag selected annotation
-            self.selected_annotation.position = event.pos() - self._drag_offset
+            self.selected_annotation.position = pos_canvas - self._drag_offset
             self.update()
 
         elif self.dragging:
@@ -248,15 +251,26 @@ class LayeredViewer(QWidget):
         self._update_status(event.pos())
 
     def mousePressEvent(self, event: QMouseEvent):
+        pos_canvas = self.get_transform("viewer", "canvas").map(event.pos())
+
         if event.button() == Qt.LeftButton:
-            ann = self._annotation_at_pos(event.pos())
+            ann = self._annotation_at_pos(pos_canvas)
             if ann:
+                # Update selected annotation
+                if self.selected_annotation is not None:
+                    self.selected_annotation.set_selection_status(False)
                 self.selected_annotation = ann
-                self._drag_offset = event.pos() - ann.position
+                self.selected_annotation.set_selection_status(True)
+
+                # Update drag offset
+                self._drag_offset = pos_canvas - ann.position
+
                 # Emit selection signal so dock can sync controls
                 self.annotation_selected.emit(ann)
                 self.update()
             else:
+                if self.selected_annotation is not None:
+                    self.selected_annotation.set_selection_status(False)
                 self.selected_annotation = None
                 self._drag_offset = None
             self.dragging = True
@@ -339,28 +353,20 @@ class LayeredViewer(QWidget):
             self._painter.fillRect(self.rect(), Qt.black)
 
         # Only paint the selected layers
-        for layer in self.get_layers():
+        selected_layers = self.get_layers()
+        for layer in selected_layers:
             self._painter.save()
             layer.paint_layer(self.canvas_to_viewer)
             self._painter.restore()
 
+        for layer in self.get_layers(all=True):
             # Set painter to canvas coordinates
             self._painter.save()
             self._painter.setTransform(self.canvas_to_viewer)
+
             # Paint annotations here
             for annotation in getattr(layer, "annotations", []):
                 annotation.paintEvent(event)
-                # Highlight currently selected annotation with a dashed rectangle
-                if annotation == self.selected_annotation:
-                    font = QFont("Arial", annotation.font_size, QFont.Bold)
-                    metrics = QFontMetrics(font)
-                    rect = QRect(
-                        annotation.position, metrics.size(0, annotation.label)
-                    ).adjusted(-2, -2, 2, 2)
-                    self._painter.save()
-                    self._painter.setPen(QPen(Qt.yellow, 1, Qt.DashLine))
-                    self._painter.drawRect(rect)
-                    self._painter.restore()
 
             # Set painter back to viewer coordinates
             self._painter.restore()

@@ -30,6 +30,9 @@ class Annotation:
         self.label = label
         self.justification = justification
         self.position = position
+        self.bounding_box = None
+
+        self._selected = False
 
     def parent(self) -> QObject:
         return self._parent
@@ -41,6 +44,9 @@ class Annotation:
         except TypeError:
             print("BLEH")
         return painter
+
+    def set_selection_status(self, selected: bool) -> None:
+        self._selected = selected
 
     def to_dict(self):
         return {
@@ -57,7 +63,10 @@ class Annotation:
             else self.position,
         }
 
-    def paintEvent(self, event):
+    def paintEvent(
+        self,
+        event,
+    ):
         painter = self.getPainter()
         painter.setPen(QPen(self.color, self.line_width))  # Red pen, 2px wide
         painter.setFont(QFont("Arial", self.font_size, QFont.Bold))
@@ -68,11 +77,27 @@ class Annotation:
             2,
         )
         font_metrics = QFontMetrics(painter.font())
+        label_size = font_metrics.size(0, self.label)
+        position = QPoint(
+            self.position.x() - label_size.width() / 2,
+            self.position.y() - label_size.height() / 2,
+        )
+        self.bounding_box = QRect(position, label_size)
         painter.drawText(
-            QRect(self.position, font_metrics.size(0, self.label)),
+            self.bounding_box,
             Qt.AlignTop | Qt.AlignLeft,
             self.label,
         )
+
+        if self._selected:
+            self.draw_selection_box(painter)
+
+    def draw_selection_box(self, painter):
+        # Highlight currently selected annotation with a dashed rectangle
+        painter.save()
+        painter.setPen(QPen(Qt.yellow, 1, Qt.DashLine))
+        painter.drawRect(self.bounding_box)
+        painter.restore()
 
 
 class AnnotationCircle(Annotation):
@@ -168,7 +193,7 @@ class AnnotationDockWidget(QDockWidget):
         """Update dock controls to reflect selected annotation properties."""
         self.text_input.setText(annotation.label)
         self._color = annotation.color
-        self.fontsize_combo.setCurrentText(str(annotation.font_size))
+        self.fontsize_input.setText(str(annotation.font_size))
         self.settingsChanged.emit()
 
     addAnnotation = Signal(
@@ -200,6 +225,7 @@ class AnnotationDockWidget(QDockWidget):
 
         layout.addWidget(QLabel("Text:"))
         self.text_input = QLineEdit()
+        self.text_input.textChanged.connect(lambda _: self.settingsChanged.emit())
         layout.addWidget(self.text_input)
 
         layout.addWidget(QLabel("Color:"))
@@ -208,12 +234,11 @@ class AnnotationDockWidget(QDockWidget):
         layout.addWidget(self.color_btn)
 
         layout.addWidget(QLabel("Font Size:"))
-        self.fontsize_combo = QComboBox()
-        for size in [10, 12, 14, 16, 18, 24, 32, 48]:
-            self.fontsize_combo.addItem(str(size))
-        self.fontsize_combo.setCurrentText("18")
-        self.fontsize_combo.currentIndexChanged.connect(self.settingsChanged.emit)
-        layout.addWidget(self.fontsize_combo)
+        self.fontsize_input = QLineEdit()
+        self.fontsize_input.setText("18")
+        self.fontsize_input.setPlaceholderText("Enter font size (number)")
+        self.fontsize_input.textChanged.connect(self._on_fontsize_changed)
+        layout.addWidget(self.fontsize_input)
 
         layout.addWidget(QLabel("Layer:"))
         self.layer_combo = QComboBox()
@@ -228,6 +253,15 @@ class AnnotationDockWidget(QDockWidget):
         container.setLayout(layout)
         self.setWidget(container)
 
+    def _on_fontsize_changed(self, text):
+        # Only emit settingsChanged if text is a valid integer
+        try:
+            value = int(float(text))
+            if value > 0:
+                self.settingsChanged.emit()
+        except Exception:
+            pass
+
     # Properties
     @property
     def color(self):
@@ -235,7 +269,14 @@ class AnnotationDockWidget(QDockWidget):
 
     @property
     def font_size(self):
-        return int(self.fontsize_combo.currentText())
+        text = self.fontsize_input.text()
+        try:
+            value = int(float(text))
+            if value > 0:
+                return value
+        except Exception:
+            pass
+        return 18  # default fallback
 
     @property
     def text(self):

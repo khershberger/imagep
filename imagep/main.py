@@ -265,8 +265,8 @@ class MainWindow(QMainWindow):
             self.viewer.update()
 
     # ToDo:  Fix this so that it works
-    def wheelEvent(self, event: QWheelEvent):
-        self.update_status_window(event)
+    # def wheelEvent(self, event: QWheelEvent):
+    #     self.update_status_window(event)
 
     def status_widget_widget(self, event):
         # Screen coordinates
@@ -374,9 +374,7 @@ class MainWindow(QMainWindow):
         # Annotation defaults: set dock starting values
         ann = prefs.annotation_defaults
         self.annotation_dock.text_input.setText("")
-        self.annotation_dock.fontsize_combo.setCurrentText(
-            str(ann.get("font_size", 18))
-        )
+        self.annotation_dock.fontsize_input.setText(str(ann.get("font_size", 18)))
         # Color is applied lazily when creating new annotation; could update button text
         # Grid visibility triggers repaint
         self.viewer.update()

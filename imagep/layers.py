@@ -38,6 +38,7 @@ class Layer(QWidget):
         self.log = logging.getLogger("Layer")
 
         self.setObjectName(name)
+        self.source = source
         self.offset_layer = offset
         self.scale_layer = scale or 1.0
         self.rotation = rotation
