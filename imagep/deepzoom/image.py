@@ -1,9 +1,11 @@
+import logging
 import os
 import xml.etree.ElementTree as ET
 import math
 import requests
 from io import BytesIO
 from math import log2, ceil
+from time import time
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -21,6 +23,8 @@ class DeepzoomImage:
         self.is_url = self._is_url(source)
 
         self._parse_dzi()
+
+        self.log = logging.getLogger("DeepzoomImage")
 
         self.tile_cache = {}  # (level, col, row): QImage
         self.cache_limit = 128  # default number of non-visible tiles to keep
@@ -100,6 +104,7 @@ class DeepzoomImage:
                 return f.read()
 
     def get_tile(self, level, col, row):
+        t_start = time()
         key = (level, col, row)
         if key in self.tile_cache:
             # self.log.debug(f"Cache hit for tile {key}")
@@ -110,6 +115,8 @@ class DeepzoomImage:
 
         self.tile_cache[key] = data
         self._enforce_cache_limit()
+
+        # self.log.debug(f"Loading tile {key} took {time() - t_start:.3f} seconds")
         return data
 
     def render_region(self, x, y, width, height, level):
