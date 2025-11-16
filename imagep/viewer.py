@@ -385,23 +385,26 @@ class LayeredViewer(QWidget):
         except Exception:
             self._painter.fillRect(self.rect(), Qt.black)
 
+        # Set canvas transformation
+        self._painter.setTransform(self.canvas_to_viewer)
+
         # Only paint the selected layers
         selected_layers = self.get_layers()
         for layer in selected_layers:
             self._painter.save()
-            layer.paint_layer(self.canvas_to_viewer)
+            layer.paint_layer()
             self._painter.restore()
 
-        for layer in self.get_layers(all=True):
-            # Set painter to canvas coordinates
-            self._painter.save()
-            self._painter.setTransform(self.canvas_to_viewer)
+        # Paint annotations according to dock setting
+        show_all = False
+        if self.annotation_dock and hasattr(self.annotation_dock, "show_all_layers"):
+            show_all = self.annotation_dock.show_all_layers
 
-            # Paint annotations here
+        layers_to_annotate = self.get_layers(all=True) if show_all else selected_layers
+        for layer in layers_to_annotate:
+            self._painter.save()
             for annotation in getattr(layer, "annotations", []):
                 annotation.paintEvent(event)
-
-            # Set painter back to viewer coordinates
             self._painter.restore()
 
         # self._painter.setPen(QPen(Qt.red, 2))
@@ -461,10 +464,13 @@ class LayeredViewer(QWidget):
         annotation is selected. Updates annotation in-place and repaints.
         """
         if not self.selected_annotation or not self.annotation_dock:
+            self.update()
             return
         ann = self.selected_annotation
         ann.label = self.annotation_dock.text
         ann.color = self.annotation_dock.color
+        ann.layer = self.annotation_dock.selected_layer_name()
+
         # Convert displayed font size (in viewer coordinates) back to raw
         # canvas coordinates by dividing by current zoom scale.
         try:

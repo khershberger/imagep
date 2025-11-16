@@ -290,17 +290,14 @@ class MainWindow(QMainWindow):
         mouse_pos = QPoint(event.position().x(), event.position().y())
 
         status = {
-            "Mouse (Screen)": global_pos,
+            "Mouse (Global)": global_pos,
             "Mouse (Viewer)": mouse_pos,
             "Mouse (Canvas)": self.viewer.canvas_to_viewer.inverted()[0].map(mouse_pos),
             "Mouse (Layer)": current_layer.layer_to_canvas.inverted()[0].map(
                 self.viewer.canvas_to_viewer.inverted()[0].map(mouse_pos)
             ),
-            "Canvas Scale": self.viewer.get_scale(),
-            "Layer Scale": current_layer.get_scale(),
-            "Scale Effective": self.viewer.get_scale() * current_layer.get_scale(),
-            "Tile Level Scale": getattr(current_layer, "current_scale_level", None),
-            "Tile Level": getattr(current_layer, "current_level", None),
+            "Scale (Viewer)": self.viewer.get_scale(),
+            "Level": getattr(current_layer, "current_level", None),
         }
 
         self.status_widget.set_status(status)
@@ -388,28 +385,18 @@ class DebugStatusWidget(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-        # self.setAttribute(Qt.WA_TranslucentBackground)
-        # self.setStyleSheet(
-        #     "background: rgba(255,255,255,0.9); border: 1px solid #888; border-radius: 6px;"
-        # )
+
         self.layout = QVBoxLayout(self)
         self.setLayout(self.layout)
         self.labels = {}
         self.readouts = {}
 
-        self.add_readout("Mouse (Native)")
+        self.add_readout("Mouse (Screen)")
         self.add_readout("Mouse (Global)")
-
-        self.add_readout("Mouse (Layer)")
-        self.add_readout("Viewer Scale")
-        self.add_readout("Viewer Offset")
-        self.add_readout("Layer Scale")
-        self.add_readout("Layer Offset")
+        self.add_readout("Mouse (Viewer)")
+        self.add_readout("Mouse (Canvas)")
+        self.add_readout("Scale (Viewer)")
         self.add_readout("Level")
-
-        # self.resize(260, 120)
-        # self.adjustSize()
-        # self.move(50, 50)
 
     def add_readout(self, key):
         hbox = QHBoxLayout()

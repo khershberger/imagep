@@ -123,10 +123,7 @@ class Layer(QWidget):
 
 
 class DeepzoomLayer(Layer):
-    def paint_layer(
-        self,
-        canvas_to_viewer: QTransform,
-    ):
+    def paint_layer(self):
         """
         Paint the deep zoom layer onto the given QPainter.
 
@@ -139,7 +136,7 @@ class DeepzoomLayer(Layer):
         painter = self.getPainter()
 
         # Construct layer_to_screen transformation
-        layer_to_screen = self.layer_to_canvas * canvas_to_viewer
+        layer_to_screen = self.layer_to_canvas * painter.transform()
         screen_to_layer = layer_to_screen.inverted()[0]
 
         # Set transformation
@@ -230,9 +227,9 @@ class DeepzoomLayer(Layer):
 class RasterImageLayer(Layer):
     """Layer implementation for non-DeepZoom raster images (e.g., JPEG)."""
 
-    def paint_layer(self, canvas_to_viewer: QTransform) -> None:
+    def paint_layer(self) -> None:
         painter = self.getPainter()
-        layer_to_screen = self.layer_to_canvas * canvas_to_viewer
+        layer_to_screen = self.layer_to_canvas * painter.transform()
         painter.setTransform(layer_to_screen)
 
         if not self.image or self.image.isNull():

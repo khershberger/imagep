@@ -3,6 +3,7 @@ from typing import Self
 
 from PySide6.QtCore import Qt, QObject, QPoint, QRect, QSize, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QColorDialog,
     QComboBox,
     QDockWidget,
@@ -225,13 +226,19 @@ class AnnotationDockWidget(QDockWidget):
         container = QWidget(self)
         layout = QVBoxLayout(container)
 
+        # Checkbox for toggling all layers vs selected layer
+        self.show_all_layers_checkbox = QCheckBox("Show annotations on all layers")
+        self.show_all_layers_checkbox.setChecked(False)
+        self.show_all_layers_checkbox.stateChanged.connect(self._on_setting_changed)
+        layout.addWidget(self.show_all_layers_checkbox)
+
         layout.addWidget(QLabel("Type:"))
         self.type_label = QLabel("Text")
         layout.addWidget(self.type_label)
 
         layout.addWidget(QLabel("Text:"))
         self.text_input = QLineEdit()
-        self.text_input.textChanged.connect(self._on_label_changed)
+        self.text_input.textChanged.connect(self._on_setting_changed)
         layout.addWidget(self.text_input)
 
         layout.addWidget(QLabel("Color:"))
@@ -249,6 +256,7 @@ class AnnotationDockWidget(QDockWidget):
         layout.addWidget(QLabel("Layer:"))
         self.layer_combo = QComboBox()
         self.layer_combo.addItem("Current Layer", userData=None)
+        self.layer_combo.currentIndexChanged.connect(self._on_setting_changed)
         layout.addWidget(self.layer_combo)
 
         self.add_btn = QPushButton("Add Annotation")
@@ -258,6 +266,11 @@ class AnnotationDockWidget(QDockWidget):
         layout.addStretch(1)
         container.setLayout(layout)
         self.setWidget(container)
+
+    @property
+    def show_all_layers(self) -> bool:
+        """Return True if the 'show all layers' checkbox is checked."""
+        return self.show_all_layers_checkbox.isChecked()
 
     # Properties
     @property
@@ -289,7 +302,7 @@ class AnnotationDockWidget(QDockWidget):
     # --- Slots ---------------------------------------------------------------
     # -------------------------------------------------------------------------
 
-    def _on_label_changed(self, text):
+    def _on_setting_changed(self, value):
         if self.sync_state:
             self.settingsChanged.emit()
 
