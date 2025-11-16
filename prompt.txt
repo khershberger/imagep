@@ -1,0 +1,12 @@
+Add a QListWidget as a dockable sidebar.  
+There shoould be a item in the list for each layer that is added to the LayeredViewer.  LayeredViewer should only paint the layer that is currently selected the list.
+
+Please implement the following functionality when the dot action icon is clicked:
+1. Provide a visual indication that the icon has been clicked
+2. Create a new AnnotationPoint for the currently selected layer
+3. Have the AnnotationPoint follow the mouse cursor until the left button is clicked.
+4. Once clicked accept text input from the keyboard to define the AnnotationPoint label value
+5. After the user presses enter return the dot action to it's default visual appearance.
+
+
+Refactor the code such that all of the layer objects are stored within layer_list_widget.  Use the UserRole property of each QListWidgetItem to store the layer objects.  When a new config is loaded, create a new QListWidgetItem for that configruation and then create a child QListWidgetItem for each layer.  Provide LayeredViewer a reference to the QListWidgetItem associated with the new configuration file.  LayeredViewer should pull all layer infomration from the provided QListWidgetItem.

@@ -2,9 +2,19 @@ import base64
 import io
 import logging
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QPointF, QSize
-from PySide6.QtGui import QPainter, QColor, QIcon, QAction, QPixmap, QPen
+from PySide6.QtCore import Qt, QCoreApplication, QPoint, QPointF, QSize
+from PySide6.QtGui import (
+    QPainter,
+    QColor,
+    QIcon,
+    QAction,
+    QPixmap,
+    QPen,
+    QWheelEvent,
+    QTransform,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -16,11 +26,17 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QLabel,
+    QToolBar,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QDockWidget,
 )
 
-from viewer import LayeredViewer
+from annotations import AnnotationDockWidget
 from icons import MICROSCOPE as MAIN_WINDOW_ICON
-# from status_floating_window import StatusFloatingWindow
+from preferences import get_preferences
+from preferences_dialog import PreferencesDialog
+from viewer import LayeredViewer
 
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("PIL.PngImagePlugin").setLevel(logging.WARNING)
@@ -30,6 +46,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DeepZoom Viewer")
+        self.setDockOptions(QMainWindow.AllowNestedDocks | QMainWindow.AllowTabbedDocks)
+
+        self.last_path = ""
+
+        self.layer_list_dock = None
+        self.layer_tree_widget = None
 
         # Set window icon
         icon_data = base64.b64decode(MAIN_WINDOW_ICON)
@@ -37,132 +59,344 @@ class MainWindow(QMainWindow):
         pixmap.loadFromData(icon_data)
         self.setWindowIcon(QIcon(pixmap))
 
-        self.viewer = None
-        self.status_window = StatusFloatingWindow(self)
-        self.status_window.show()
+        # Build UI and apply preferences
         self.init_ui()
+        self.apply_preferences_startup()
+        self._connect_preferences()
 
     def init_ui(self):
+        # self.create_actions()
+        self.create_menubar()
+        # self.create_toolbar()
+
         central = QWidget()
         vbox = QVBoxLayout(central)
 
         # Input controls
         hbox = QHBoxLayout()
-        self.input_edit = QLineEdit()
-        self.input_edit.setPlaceholderText("Enter .dzi file path or URL...")
-        # self.input_edit.setText("sample.dzi")
-        self.input_edit.setText("collection.toml")
+        self.definition_load_edit = QLineEdit()
+        self.definition_load_edit.setPlaceholderText("Definition file to load...")
+        self.last_path = Path(self.definition_load_edit.text().strip()).parent  # TEMP!
+
         browse_btn = QPushButton("Browse")
         load_btn = QPushButton("Load")
         hbox.addWidget(QLabel("DeepZoom Source:"))
-        hbox.addWidget(self.input_edit)
+        hbox.addWidget(self.definition_load_edit)
         hbox.addWidget(browse_btn)
         hbox.addWidget(load_btn)
         vbox.addLayout(hbox)
 
-        # Viewer placeholder
-        self.viewer_container = QVBoxLayout()
-        vbox.addLayout(self.viewer_container)
+        # Viewer
+        self.viewer = LayeredViewer()
+        vbox.addWidget(self.viewer)
+        self.viewer.setMouseTracking(True)
+        self.viewer.mouseMoveEvent = self._make_mouse_move_event(
+            self.viewer.mouseMoveEvent
+        )
+
+        # Setup central widget
         central.setLayout(vbox)
         self.setCentralWidget(central)
 
+        # Add dockable layer tree
+        self.layer_tree_widget = QTreeWidget()
+        self.layer_tree_widget.setColumnWidth(0, 200)
+        self.layer_tree_widget.setHeaderLabels(["Config / Layers"])
+        self.layer_tree_widget.itemSelectionChanged.connect(self.on_layer_selected)
+        self.layer_list_dock = QDockWidget("Layers", self)
+        self.layer_list_dock.setWidget(self.layer_tree_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.layer_list_dock)
+
+        # Create status dock
+        self.status_widget = DebugStatusWidget(self)
+        self.status_dock = QDockWidget("Status", self)
+        self.status_dock.setWidget(self.status_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.status_dock)
+
+        # Annotation dock widget (refactored)
+        dock = AnnotationDockWidget(self)
+
+        # Connect Add Annotation signal to viewer handler.
+        dock.addAnnotation.connect(self.viewer._on_add_annotation)
+        # Live property updates when dock controls change.
+        dock.settingsChanged.connect(self.viewer._on_annotation_settings_changed)
+
+        self.annotation_dock = dock
+        self.viewer.annotation_dock = dock
+
+        self.addDockWidget(Qt.RightDockWidgetArea, self.annotation_dock)
+
+        # Sync dock widgets when an annotation is selected.
+        self.viewer.annotation_selected.connect(self.annotation_dock.sync_to_annotation)
+
         # Connect
         browse_btn.clicked.connect(self.browse_file)
-        load_btn.clicked.connect(self.load_config)
+        load_btn.clicked.connect(self.load_definition)
+        # Layer list refresh when selection changes (for future multi-layer support)
+        self.layer_tree_widget.itemSelectionChanged.connect(
+            self.refresh_annotation_layers
+        )
+        self.refresh_annotation_layers()
+
+    def refresh_annotation_layers(self):
+        """Populate the annotation dock's layer selector with current layers."""
+        if (
+            not hasattr(self.viewer, "selection_widget")
+            or self.viewer.selection_widget is None
+        ):
+            return
+        names = []
+        root = self.viewer.selection_widget
+        for i in range(root.childCount()):
+            child = root.child(i)
+            layer = child.data(0, Qt.UserRole)
+            if layer is not None:
+                names.append(layer.objectName() or f"Layer {i}")
+        self.annotation_dock.refresh_layer_list(names)
+
+    def create_icon(self, icon_type):
+        icon = QIcon()
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setPen(QPen(QColor(0, 0, 0), 2))
+
+        if icon_type == "dot":
+            painter.setBrush(QColor(0, 0, 0))
+            painter.drawEllipse(12, 12, 8, 8)
+        elif icon_type == "ruler":
+            painter.drawLine(4, 28, 28, 4)
+            # Add small perpendicular lines at ends
+            painter.drawLine(2, 26, 6, 30)
+            painter.drawLine(26, 2, 30, 6)
+        elif icon_type == "rectangle":
+            painter.drawRect(8, 8, 16, 16)
+
+        painter.end()
+        icon.addPixmap(pixmap)
+        return icon
+
+    # def create_actions(self):
+    #     self.actions = {}
+    #     for tool in ["dot", "ruler", "rectangle"]:
+    #         action = QAction(self.create_icon(tool), tool.capitalize(), self)
+    #         action.setStatusTip(f"Add {tool} annotation")
+    #         self.actions[tool] = action
+    #     self.setup_annotation_tools()
+
+    def create_menubar(self):
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu("File")
+        file_menu.addAction("Open")
+        file_menu.addAction("Save")
+        save_as_action = QAction("Save As", self)
+        save_as_action.triggered.connect(self.save_as)
+        file_menu.addAction(save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction("Exit")
+
+        # Recent Files submenu (populated dynamically)
+        self.recent_files_menu = file_menu.addMenu("Recent Files")
+        self._rebuild_recent_files_menu()
+
+        # Preferences action
+        prefs_action = QAction("Preferences", self)
+        prefs_action.triggered.connect(self.open_preferences_dialog)
+        menubar.addAction(prefs_action)
+
+        # # Annotations menu
+        # annotations_menu = menubar.addMenu("Annotations")
+        # for action in self.actions.values():
+        #     annotations_menu.addAction(action)
+
+    def save_as(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save As", str(self.last_path), "JSON Files (*.json);;All Files (*)"
+        )
+
+        if not file_path:
+            return
+
+        self.last_path = Path(file_path)
+        if self.viewer:
+            self.viewer.dump_config_json(Path(file_path))
+
+    def create_toolbar(self):
+        toolbar = QToolBar()
+        toolbar.setIconSize(QSize(32, 32))
+        for action in self.actions.values():
+            toolbar.addAction(action)
+        self.addToolBar(toolbar)
 
     def browse_file(self):
         file, _ = QFileDialog.getOpenFileName(
-            self, "Select DeepZoom .dzi File", "", "DeepZoom Files (*.dzi)"
+            self,
+            caption="Select Configuration or Image File",
+            dir=str(self.last_path),
+            filter="JSON Files (*.json);;Image Files (*.jpg *.jpeg *.png);;All Files (*)",
         )
         if file:
-            self.input_edit.setText(file)
+            self.definition_load_edit.setText(file)
+            self.last_path = Path(file).parent
+            # Track recent file selection (not yet loaded)
+            get_preferences().add_recent_file(file)
+            get_preferences().save()
+            self._rebuild_recent_files_menu()
 
-    def load_config(self):
-        source = self.input_edit.text().strip()
-        if not source:
-            return
-        # Remove old viewer if present
-        if self.viewer:
-            try:
-                self.viewer.mouseMoveEvent.disconnect()
-            except Exception:
-                pass
-            self.viewer.setParent(None)
-            self.viewer.deleteLater()
-            self.viewer = None
+    def load_definition(self):
+        config = Path(self.definition_load_edit.text().strip())
+        self.last_path = config
+        # Create new tree item root for config/image context if not already
+        config_item = QTreeWidgetItem([config.name])
+        self.layer_tree_widget.addTopLevelItem(config_item)
+        self.viewer.set_selection_widget(config_item)
+
         try:
-            self.viewer = LayeredViewer(config=source)
-            self.viewer_container.addWidget(self.viewer)
-            self.viewer.setMouseTracking(True)
-            self.viewer.mouseMoveEvent = self._make_mouse_move_event(
-                self.viewer.mouseMoveEvent
-            )
+            if config.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                # Treat as a single raster image layer
+                self.viewer.add_image_layer(config)
+            else:
+                # Assume JSON DeepZoom config
+                self.viewer.load_config_json(config)
+            self.layer_tree_widget.setCurrentItem(config_item)
+            self.refresh_annotation_layers()
+            # Update MRU on successful load
+            get_preferences().add_recent_file(str(config))
+            get_preferences().save()
+            self._rebuild_recent_files_menu()
         except Exception as e:
-            error_label = QLabel(f"Failed to load: {e}")
-            self.viewer_container.addWidget(error_label)
+            print(f"Failed to load: {e}")
 
-    def update_status_window(self, event):
+    def on_layer_selected(self):
+        if self.viewer:
+            self.viewer.update()
+
+    # ToDo:  Fix this so that it works
+    # def wheelEvent(self, event: QWheelEvent):
+    #     self.update_status_window(event)
+
+    def status_widget_widget(self, event):
         # Screen coordinates
         global_pos = self.viewer.mapToGlobal(event.position())
 
         # Compose status
-
-        current_layer = self.viewer.layers[0]
+        try:
+            current_layer = self.viewer.get_layers()[0]
+        except IndexError:
+            return
 
         mouse_pos = QPoint(event.position().x(), event.position().y())
 
         status = {
-            "Mouse (Screen)": global_pos,
+            "Mouse (Global)": global_pos,
             "Mouse (Viewer)": mouse_pos,
             "Mouse (Canvas)": self.viewer.canvas_to_viewer.inverted()[0].map(mouse_pos),
             "Mouse (Layer)": current_layer.layer_to_canvas.inverted()[0].map(
                 self.viewer.canvas_to_viewer.inverted()[0].map(mouse_pos)
             ),
-            "Canvas Scale": self.viewer.get_scale(),
-            "Layer Scale": current_layer.get_scale(),
-            "Scale Effective": self.viewer.get_scale() * current_layer.get_scale(),
-            "Tile Level Scale": current_layer.current_scale_level,
-            "Tile Level": current_layer.current_level,
+            "Scale (Viewer)": self.viewer.get_scale(),
+            "Level": getattr(current_layer, "current_level", None),
         }
 
-        self.status_window.set_status(status)
+        self.status_widget.set_status(status)
 
     def _make_mouse_move_event(self, orig_mouse_move_event):
         def mouse_move_event(event):
             # Call original event
             orig_mouse_move_event(event)
 
-            self.update_status_window(event)
+            self.status_widget_widget(event)
 
         return mouse_move_event
 
+    # --- Preferences Integration ------------------------------------------
+    def apply_preferences_startup(self):
+        prefs = get_preferences()
+        # Background handled in viewer paint; request repaint
+        self.viewer.update()
+        # Default zoom: adjust viewer transform to target scale
+        target = prefs.default_zoom
+        current = self.viewer.get_scale()
+        if current > 0 and target != current:
+            factor = target / current
+            self.viewer.canvas_to_viewer = (
+                self.viewer.canvas_to_viewer * QTransform().scale(factor, factor)
+            )
+        # Annotation defaults: set dock starting values
+        ann = prefs.annotation_defaults
+        self.annotation_dock.text_input.setText("")
+        self.annotation_dock.fontsize_input.setText(str(ann.get("font_size", 18)))
+        # Color is applied lazily when creating new annotation; could update button text
+        # Grid visibility triggers repaint
+        self.viewer.update()
 
-class StatusFloatingWindow(QDialog):
+    def _connect_preferences(self):
+        prefs = get_preferences()
+        prefs.changed.connect(self.on_pref_changed)
+
+    def on_pref_changed(self, key: str, value):
+        """Respond to runtime preference changes (live apply where possible)."""
+        if key in {"background_color", "show_grid"}:
+            self.viewer.update()
+        elif key == "recent_files" or key == "recent_files_max":
+            self._rebuild_recent_files_menu()
+        elif key == "default_zoom":
+            # Adjust transform to new zoom keeping current center
+            current = self.viewer.get_scale()
+            target = float(value)
+            if current > 0 and target != current:
+                factor = target / current
+                self.viewer.canvas_to_viewer = (
+                    self.viewer.canvas_to_viewer * QTransform().scale(factor, factor)
+                )
+                self.viewer.update()
+        elif key == "annotation_defaults":
+            # Update dock font size default only (text color applied when creating new annotation)
+            self.annotation_dock.fontsize_combo.setCurrentText(
+                str(value.get("font_size", 18))
+            )
+
+    def _rebuild_recent_files_menu(self):
+        if not hasattr(self, "recent_files_menu"):
+            return
+        self.recent_files_menu.clear()
+        prefs = get_preferences()
+        for path in prefs.recent_files:
+            act = QAction(path, self)
+            act.triggered.connect(lambda checked=False, p=path: self._open_recent(p))
+            self.recent_files_menu.addAction(act)
+        if not prefs.recent_files:
+            empty = QAction("(None)", self)
+            empty.setEnabled(False)
+            self.recent_files_menu.addAction(empty)
+
+    def _open_recent(self, path: str):
+        self.definition_load_edit.setText(path)
+        self.load_definition()
+
+    def open_preferences_dialog(self):
+        dlg = PreferencesDialog(self)
+        dlg.exec()
+
+
+class DebugStatusWidget(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-        # self.setAttribute(Qt.WA_TranslucentBackground)
-        # self.setStyleSheet(
-        #     "background: rgba(255,255,255,0.9); border: 1px solid #888; border-radius: 6px;"
-        # )
+
         self.layout = QVBoxLayout(self)
         self.setLayout(self.layout)
         self.labels = {}
         self.readouts = {}
 
-        self.add_readout("Mouse (Native)")
+        self.add_readout("Mouse (Screen)")
         self.add_readout("Mouse (Global)")
-
-        self.add_readout("Mouse (Layer)")
-        self.add_readout("Viewer Scale")
-        self.add_readout("Viewer Offset")
-        self.add_readout("Layer Scale")
-        self.add_readout("Layer Offset")
+        self.add_readout("Mouse (Viewer)")
+        self.add_readout("Mouse (Canvas)")
+        self.add_readout("Scale (Viewer)")
         self.add_readout("Level")
-
-        # self.resize(260, 120)
-        self.adjustSize()
-        self.move(50, 50)
 
     def add_readout(self, key):
         hbox = QHBoxLayout()
@@ -198,6 +432,7 @@ class StatusFloatingWindow(QDialog):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    QCoreApplication.setApplicationName("ImageP")
     win = MainWindow()
     win.resize(1200, 900)
     win.move(300, 50)

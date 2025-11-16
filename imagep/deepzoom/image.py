@@ -30,6 +30,8 @@ class DeepzoomImage:
 
         self._parse_dzi()
 
+        self.log = logging.getLogger("DeepzoomImage")
+
         self.use_threading = True
         self.max_threads = 8
         self.allow_background = True
