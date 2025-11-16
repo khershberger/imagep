@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from annotations import AnnotationDockWidget
 from icons import MICROSCOPE as MAIN_WINDOW_ICON
 from preferences import get_preferences
+from preferences_dialog import PreferencesDialog
 from viewer import LayeredViewer
 
 logging.basicConfig(level=logging.DEBUG)
@@ -64,9 +65,9 @@ class MainWindow(QMainWindow):
         self._connect_preferences()
 
     def init_ui(self):
-        self.create_actions()
+        # self.create_actions()
         self.create_menubar()
-        self.create_toolbar()
+        # self.create_toolbar()
 
         central = QWidget()
         vbox = QVBoxLayout(central)
@@ -113,12 +114,20 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.status_dock)
 
         # Annotation dock widget (refactored)
-        self.annotation_dock = AnnotationDockWidget(self)
+        dock = AnnotationDockWidget(self)
+
+        # Connect Add Annotation signal to viewer handler.
+        dock.addAnnotation.connect(self.viewer._on_add_annotation)
+        # Live property updates when dock controls change.
+        dock.settingsChanged.connect(self.viewer._on_annotation_settings_changed)
+
+        self.annotation_dock = dock
+        self.viewer.annotation_dock = dock
+
         self.addDockWidget(Qt.RightDockWidgetArea, self.annotation_dock)
-        # Connect dock signals to viewer
-        self.annotation_dock.addAnnotation.connect(self.viewer._on_add_annotation)
+
+        # Sync dock widgets when an annotation is selected.
         self.viewer.annotation_selected.connect(self.annotation_dock.sync_to_annotation)
-        self.viewer.set_annotation_dock(self.annotation_dock)
 
         # Connect
         browse_btn.clicked.connect(self.browse_file)
@@ -167,13 +176,13 @@ class MainWindow(QMainWindow):
         icon.addPixmap(pixmap)
         return icon
 
-    def create_actions(self):
-        self.actions = {}
-        for tool in ["dot", "ruler", "rectangle"]:
-            action = QAction(self.create_icon(tool), tool.capitalize(), self)
-            action.setStatusTip(f"Add {tool} annotation")
-            self.actions[tool] = action
-        self.setup_annotation_tools()
+    # def create_actions(self):
+    #     self.actions = {}
+    #     for tool in ["dot", "ruler", "rectangle"]:
+    #         action = QAction(self.create_icon(tool), tool.capitalize(), self)
+    #         action.setStatusTip(f"Add {tool} annotation")
+    #         self.actions[tool] = action
+    #     self.setup_annotation_tools()
 
     def create_menubar(self):
         menubar = self.menuBar()
@@ -197,10 +206,10 @@ class MainWindow(QMainWindow):
         prefs_action.triggered.connect(self.open_preferences_dialog)
         menubar.addAction(prefs_action)
 
-        # Annotations menu
-        annotations_menu = menubar.addMenu("Annotations")
-        for action in self.actions.values():
-            annotations_menu.addAction(action)
+        # # Annotations menu
+        # annotations_menu = menubar.addMenu("Annotations")
+        # for action in self.actions.values():
+        #     annotations_menu.addAction(action)
 
     def save_as(self):
         file_path, _ = QFileDialog.getSaveFileName(
@@ -305,59 +314,6 @@ class MainWindow(QMainWindow):
 
         return mouse_move_event
 
-    def setup_annotation_tools(self):
-        self.active_tool = None
-        self.dot_action = self.actions["dot"]
-        self.dot_action.setCheckable(True)
-        self.dot_action.triggered.connect(self.activate_dot_tool)
-        self.annotation_label_edit = None
-
-    def activate_dot_tool(self):
-        # Visual indication
-        for t, act in self.actions.items():
-            act.setChecked(t == "dot")
-        self.active_tool = "dot"
-        if self.viewer:
-            self.viewer.set_annotation_tool_state(True)
-
-    def deactivate_dot_tool(self):
-        # Called after label input is finished
-        self.actions["dot"].setChecked(False)
-        self.viewer.set_annotation_tool_state(False)
-
-    def start_label_input(self, annotation, finish_callback):
-        # Create a QLineEdit overlay for label input
-        if self.annotation_label_edit:
-            self.annotation_label_edit.deleteLater()
-        self.annotation_label_edit = QLineEdit(self)
-        self.annotation_label_edit.setPlaceholderText("Enter label...")
-        self.annotation_label_edit.setFixedWidth(120)
-        self.annotation_label_edit.setText(annotation.label)
-
-        # Place at annotation position (approximate)
-        pos = self.viewer.canvas_to_viewer.map(
-            annotation.parent().layer_to_canvas.map(annotation.position)
-        )
-        pos = self.viewer.mapToGlobal(pos)
-
-        self.annotation_label_edit.move(self.mapFromGlobal(pos))
-        self.annotation_label_edit.show()
-        self.annotation_label_edit.setFocus()
-
-        def on_text_changed(text):
-            annotation.label = text
-            self.viewer.update()
-
-        self.annotation_label_edit.textChanged.connect(on_text_changed)
-
-        def finish():
-            annotation.label = self.annotation_label_edit.text()
-            self.annotation_label_edit.deleteLater()
-            self.annotation_label_edit = None
-            finish_callback()
-
-        self.annotation_label_edit.returnPressed.connect(finish)
-
     # --- Preferences Integration ------------------------------------------
     def apply_preferences_startup(self):
         prefs = get_preferences()
@@ -424,8 +380,6 @@ class MainWindow(QMainWindow):
         self.load_definition()
 
     def open_preferences_dialog(self):
-        from preferences_dialog import PreferencesDialog
-
         dlg = PreferencesDialog(self)
         dlg.exec()
 

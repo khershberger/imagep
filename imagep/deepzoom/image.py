@@ -116,7 +116,7 @@ class DeepzoomImage:
         self.tile_cache[key] = data
         self._enforce_cache_limit()
 
-        self.log.debug(f"Loading tile {key} took {time() - t_start:.3f} seconds")
+        # self.log.debug(f"Loading tile {key} took {time() - t_start:.3f} seconds")
         return data
 
     def render_region(self, x, y, width, height, level):

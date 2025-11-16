@@ -1,7 +1,17 @@
+import logging
 from typing import Self
 
 from PySide6.QtCore import Qt, QObject, QPoint, QRect, QSize, Signal
-from PySide6.QtWidgets import QDockWidget
+from PySide6.QtWidgets import (
+    QColorDialog,
+    QComboBox,
+    QDockWidget,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -187,15 +197,19 @@ class AnnotationDockWidget(QDockWidget):
     """Dock widget providing UI for creating text annotations.
 
     Integrated into annotations module for simplified imports.
+
+    Notes
+    -----
+    Font sizes stored on annotations are expressed in *canvas* coordinates so
+    that zooming the viewer properly scales text. When an annotation is
+    selected we want to display the *perceived* (on-screen) font size in the
+    dock, which is the stored size multiplied by the current viewer scale.
+    The viewer passes in this "displayed" size during sync. When the user
+    edits the font size we later convert it back to canvas units inside the
+    viewer before applying it to the annotation.
     """
 
-    def sync_to_annotation(self, annotation):
-        """Update dock controls to reflect selected annotation properties."""
-        self.text_input.setText(annotation.label)
-        self._color = annotation.color
-        self.fontsize_input.setText(str(annotation.font_size))
-        self.settingsChanged.emit()
-
+    # Signal definitions
     addAnnotation = Signal(
         str, QColor, int, object
     )  # text, color, fontSize, targetLayerName/None
@@ -203,19 +217,11 @@ class AnnotationDockWidget(QDockWidget):
 
     def __init__(self, parent=None):
         super().__init__("Annotations", parent)
+        self.sync_state = True
         self._color = QColor(Qt.blue)
         self._build_ui()
 
     def _build_ui(self):
-        from PySide6.QtWidgets import (
-            QWidget,
-            QVBoxLayout,
-            QLabel,
-            QLineEdit,
-            QPushButton,
-            QComboBox,
-        )
-
         container = QWidget(self)
         layout = QVBoxLayout(container)
 
@@ -225,7 +231,7 @@ class AnnotationDockWidget(QDockWidget):
 
         layout.addWidget(QLabel("Text:"))
         self.text_input = QLineEdit()
-        self.text_input.textChanged.connect(lambda _: self.settingsChanged.emit())
+        self.text_input.textChanged.connect(self._on_label_changed)
         layout.addWidget(self.text_input)
 
         layout.addWidget(QLabel("Color:"))
@@ -253,15 +259,6 @@ class AnnotationDockWidget(QDockWidget):
         container.setLayout(layout)
         self.setWidget(container)
 
-    def _on_fontsize_changed(self, text):
-        # Only emit settingsChanged if text is a valid integer
-        try:
-            value = int(float(text))
-            if value > 0:
-                self.settingsChanged.emit()
-        except Exception:
-            pass
-
     # Properties
     @property
     def color(self):
@@ -288,14 +285,30 @@ class AnnotationDockWidget(QDockWidget):
             return None
         return self.layer_combo.currentData()
 
-    # Slots
-    def _on_pick_color(self):
-        from PySide6.QtWidgets import QColorDialog
+    # -------------------------------------------------------------------------
+    # --- Slots ---------------------------------------------------------------
+    # -------------------------------------------------------------------------
 
+    def _on_label_changed(self, text):
+        if self.sync_state:
+            self.settingsChanged.emit()
+
+    def _on_fontsize_changed(self, text):
+        # Only emit settingsChanged if text is a valid integer
+        try:
+            value = int(float(text))
+            if value > 0 and self.sync_state:
+                self.settingsChanged.emit()
+        except Exception:
+            pass
+
+    def _on_pick_color(self):
         color = QColorDialog.getColor(self._color, self)
         if color.isValid():
             self._color = color
-            self.settingsChanged.emit()
+            self._update_color_button()
+            if self.sync_state:
+                self.settingsChanged.emit()
 
     def _emit_add(self):
         self.addAnnotation.emit(
@@ -305,7 +318,20 @@ class AnnotationDockWidget(QDockWidget):
             self.selected_layer_name(),
         )
 
-    # External API
+    def _update_color_button(self):
+        """Update color button style to reflect current selected color."""
+        try:
+            # Use a simple stylesheet so user immediately sees selected color.
+            self.color_btn.setStyleSheet(
+                f"background-color: {self._color.name()}; color: white;"
+            )
+        except Exception:
+            # Fail silently; color feedback is non-critical.
+            pass
+
+    # -------------------------------------------------------------------------
+    # --- External API ---------------------------------------------------------
+    # -------------------------------------------------------------------------
     def refresh_layer_list(self, layer_names: list[str]):
         current = self.selected_layer_name()
         self.layer_combo.clear()
@@ -316,3 +342,26 @@ class AnnotationDockWidget(QDockWidget):
             idx = self.layer_combo.findData(current)
             if idx >= 0:
                 self.layer_combo.setCurrentIndex(idx)
+
+    def sync_to_annotation(self, viewer, annotation: Annotation):
+        """Update dock controls to reflect selected annotation properties.
+
+        Parameters
+        ----------
+        viewer : LayeredViewer
+            The viewer containing the annotation.
+        annotation : Annotation
+            The annotation whose properties are being reflected.
+        """
+        self.sync_state = False
+        self.text_input.setText(annotation.label)
+        self._color = annotation.color
+
+        scale = viewer.get_scale()
+        displayed_font_size = int(round(annotation.font_size * scale))
+
+        self.fontsize_input.setText(str(displayed_font_size))
+        self._update_color_button()
+
+        self.sync_state = True
+        self.settingsChanged.emit()
