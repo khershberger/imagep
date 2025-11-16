@@ -9,7 +9,7 @@ from PySide6.QtGui import (
     QPen,
     QTransform,
 )
-from PySide6.QtCore import Qt, QPoint, QRectF, QSize
+from PySide6.QtCore import Qt, QPoint, QRectF, QSize, QTimer
 
 from deepzoom.image import DeepzoomImage
 
@@ -48,6 +48,11 @@ class Layer(QWidget):
             self.reader = DeepzoomImage(source)
             self.width = self.reader.width
             self.height = self.reader.height
+
+        # Create refresh timer
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setSingleShot(True)
+        self.refresh_timer.timeout.connect(self.parent().update)
 
     def get_scale(self):
         return sqrt(abs(self.layer_to_canvas.determinant()))
@@ -100,65 +105,41 @@ class DeepzoomLayer(Layer):
         self.current_scale_level = scale_level
 
         # Determine visible area
-        viewable_area = screen_to_layer.mapRect(self.parent().rect())
+        viewer_rect = self.parent().rect()
+        viewable_rect = screen_to_layer.mapRect(viewer_rect)
 
         # Determine visible tiles
         tile_list = self.reader.get_visible_tiles(
-            viewable_area.topLeft().x(),
-            viewable_area.topLeft().y(),
-            viewable_area.width(),
-            viewable_area.height(),
-            level,
+            viewable_rect.topLeft().x(),
+            viewable_rect.topLeft().y(),
+            viewable_rect.width(),
+            viewable_rect.height(),
+            viewer_rect.width(),
+            viewer_rect.height(),
+            load_data=True,
         )
 
-        # Preload all tiles to facilitate parallel IO operations
-        self.reader.cache_tiles(tile_list)
-
-        # self.log.debug(
-        #     "Visible Tiles: (R%d,C%d) (R%d,C%d)  Max: (R%d, C%d)",
-        #     top_left.y(),
-        #     top_left.x(),
-        #     bottom_right.y(),
-        #     bottom_right.x(),
-        #     max_row,
-        #     max_col,
-        # )
-
-        for item in tile_list:
+        complete = True
+        for tile in tile_list:
             # This should always be pulling from cache
-            img = self.reader.get_tile(item["level"], item["col"], item["row"])
-            scale_level = self.reader.level_scale(level)
 
-            if img:
-                xy_layer = QPoint(
-                    int(item["col"] * tile_size / scale_level),
-                    int(item["row"] * tile_size / scale_level),
-                )
-                wh_layer = QPoint(
-                    int(img.width() / scale_level),
-                    int(img.height() / scale_level),
-                )
+            if tile.data:
+                xy_layer = QPoint(tile.x0, tile.y0)
+                wh_layer = QSize(tile.width, tile.height)
 
                 painter.drawImage(
-                    QRectF(xy_layer, xy_layer + wh_layer),
-                    img,
+                    QRectF(xy_layer, wh_layer),
+                    tile.data,
                 )
-
-                # self.log.debug(
-                #     "Rendering R%d, C%d  (%d,%d), (%d,%d)",
-                #     item["row"],
-                #     item["col"],
-                #     xy_layer.x(),
-                #     xy_layer.y(),
-                #     wh_layer.x(),
-                #     wh_layer.y(),
-                # )
             else:
-                self.log.warning(
-                    "Error loading tile (R%d, C%d)", item["row"], item["col"]
-                )
+                complete = False
+                # self.log.warning("Error loading tile (R%d, C%d)", tile.row, tile.col)
 
-        # Draw test rectangle
+        # Register time to triger additional paint event if not all tiles were loaded
+        if not complete:
+            self.refresh_timer.start(500)
+
+        # Draw tile rectangle
         painter.setPen(QPen(Qt.black, 10))
         painter.drawRect(-127, -127, 254, 254)
 
