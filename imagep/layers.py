@@ -165,7 +165,7 @@ class DeepzoomLayer(Layer):
         viewable_rect = screen_to_layer.mapRect(viewer_rect)
 
         # Determine visible tiles
-        tile_list = self.reader.get_visible_tiles(
+        tile_list = self.image.get_visible_tiles(
             viewable_rect.topLeft().x(),
             viewable_rect.topLeft().y(),
             viewable_rect.width(),
