@@ -9,7 +9,7 @@ from PySide6.QtGui import (
     QPen,
     QTransform,
 )
-from PySide6.QtCore import Qt, QPoint, QRectF
+from PySide6.QtCore import Qt, QPoint, QRectF, QSize, QTimer
 
 from deepzoom.image import DeepzoomImage
 from PySide6.QtGui import QImage
@@ -51,6 +51,11 @@ class Layer(QWidget):
         self.layer_to_canvas = self.compute_transform()
 
         self.image = None
+
+        # Create refresh timer
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setSingleShot(True)
+        self.refresh_timer.timeout.connect(self.parent().update)
 
         if source and source != "None":
             lower = source.lower()
@@ -156,72 +161,43 @@ class DeepzoomLayer(Layer):
         self.current_scale_level = scale_level
 
         # Determine visible area
-        viewable_area = screen_to_layer.mapRect(self.parent().rect())
+        viewer_rect = self.parent().rect()
+        viewable_rect = screen_to_layer.mapRect(viewer_rect)
 
         # Determine visible tiles
-        top_left = self.image.image_coords_to_tile_index(
-            viewable_area.topLeft().x(), viewable_area.topLeft().y(), level
-        )
-        top_left = QPoint(
-            max(0, top_left[0]),
-            max(0, top_left[1]),
-        )
-        bottom_right = self.image.image_coords_to_tile_index(
-            viewable_area.bottomRight().x(), viewable_area.bottomRight().y(), level
-        )
-        bottom_right = QPoint(
-            min(max_col, bottom_right[0]),
-            min(max_row, bottom_right[1]),
+        tile_list = self.image.get_visible_tiles(
+            viewable_rect.topLeft().x(),
+            viewable_rect.topLeft().y(),
+            viewable_rect.width(),
+            viewable_rect.height(),
+            viewer_rect.width(),
+            viewer_rect.height(),
+            load_data=True,
         )
 
-        # self.log.debug(
-        #     "Visible Tiles: (R%d,C%d) (R%d,C%d)  Max: (R%d, C%d)",
-        #     top_left.y(),
-        #     top_left.x(),
-        #     bottom_right.y(),
-        #     bottom_right.x(),
-        #     max_row,
-        #     max_col,
-        # )
+        complete = True
+        for tile in tile_list:
+            # This should always be pulling from cache
 
-        painter.setPen(QPen(Qt.black, 2))
+            if tile.data:
+                xy_layer = QPoint(tile.x0, tile.y0)
+                wh_layer = QSize(tile.width, tile.height)
 
-        for row in range(top_left.y(), bottom_right.y() + 1):
-            for col in range(top_left.x(), bottom_right.x() + 1):
-                img = self.image.get_tile(level, col, row)
+                painter.drawImage(
+                    QRectF(xy_layer, wh_layer),
+                    tile.data,
+                )
+            else:
+                complete = False
+                # self.log.warning("Error loading tile (R%d, C%d)", tile.row, tile.col)
 
-                if img:
-                    # In layer coordinates
-                    xy_layer = QPoint(
-                        int(col * tile_size / scale_level),
-                        int(row * tile_size / scale_level),
-                    )
-                    wh_layer = QPoint(
-                        int(img.width() / scale_level),
-                        int(img.height() / scale_level),
-                    )
+        # Register time to triger additional paint event if not all tiles were loaded
+        if not complete:
+            self.refresh_timer.start(500)
 
-                    rect = QRectF(xy_layer, xy_layer + wh_layer)
-                    painter.drawImage(rect, img)
-
-                    painter.drawRect(rect)
-
-                    # self.log.debug(
-                    #     "Plotting R%d, C%d  (%d,%d), (%d,%d)",
-                    #     row,
-                    #     col,
-                    #     xy_layer.x(),
-                    #     xy_layer.y(),
-                    #     wh_layer.x(),
-                    #     wh_layer.y(),
-                    # )
-
-                else:
-                    self.log.warning("Error loading tile (R%d, C%d)", row, col)
-
-        # Draw test rectangle
-        # painter.setPen(QPen(Qt.black, 10))
-        # painter.drawRect(-127, -127, 254, 254)
+        # Draw tile rectangle
+        painter.setPen(QPen(Qt.black, 10))
+        painter.drawRect(-127, -127, 254, 254)
 
 
 class RasterImageLayer(Layer):
